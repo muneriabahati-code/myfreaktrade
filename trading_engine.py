@@ -1,12 +1,17 @@
 import MetaTrader5 as mt5
-import pandas as pd
 from config import *
 from datetime import datetime
+
+# ------------------ LOGGING ------------------
+def log(message):
+    print(f"{datetime.now().strftime('%H:%M:%S')} - {message}")
+    with open("trades_log.txt", "a") as f:
+        f.write(f"{datetime.now()} - {message}\n")
 
 # ------------------ INIT ------------------
 def initialize():
     if not mt5.initialize():
-        print("MT5 initialization failed")
+        log("🚨 MT5 initialization failed")
         return False
     return True
 
@@ -15,72 +20,58 @@ def get_balance():
     return mt5.account_info().balance
 
 def calculate_lot(balance):
+    # Dynamic risk management
     risk_amount = balance * (RISK_PERCENT / 100)
     lot = risk_amount / (STOP_LOSS_PIPS * 10)
     return max(round(lot, 2), 0.01)  # minimum lot protection
-
-# ------------------ MARKET DATA ------------------
-def get_data():
-    rates = mt5.copy_rates_from_pos(SYMBOL, TIMEFRAME, 0, 100)
-    df = pd.DataFrame(rates)
-
-    df['ma20'] = df['close'].rolling(20).mean()
-    df['ma50'] = df['close'].rolling(50).mean()
-
-    # RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-
-    return df
-
-# ------------------ CONDITIONS ------------------
-def generate_signal():
-    df = get_data()
-    last = df.iloc[-1]
-
-    if last['ma20'] > last['ma50'] and last['rsi'] < 70:
-        return "BUY"
-
-    elif last['ma20'] < last['ma50'] and last['rsi'] > 30:
-        return "SELL"
-
-    return None
 
 # ------------------ TRADE CHECK ------------------
 def can_trade():
     positions = mt5.positions_get(symbol=SYMBOL)
     return positions is None or len(positions) == 0
 
-# ------------------ EXECUTION ------------------
-def execute_trade():
-
+# ------------------ PURE EXECUTION ------------------
+def execute_trade(signal):
+    """
+    This function takes a 'BUY' or 'SELL' string and executes it safely.
+    """
     if not initialize():
         return
 
     if not can_trade():
-        log("Trade skipped: already open")
+        log(f"🛡️ Trade skipped: {SYMBOL} position already open.")
         return
 
-    signal = generate_signal()
-
-    if signal is None:
-        log("No signal")
+    # 1. Get exact market data
+    tick = mt5.symbol_info_tick(SYMBOL)
+    info = mt5.symbol_info(SYMBOL)
+    
+    if tick is None or info is None:
+        log(f"🚨 FAILED: Could not get market data for {SYMBOL}. Market closed?")
         return
 
+    # 2. Calculate dynamic lot size
     balance = get_balance()
     lot = calculate_lot(balance)
 
-    tick = mt5.symbol_info_tick(SYMBOL)
-    price = tick.ask if signal == "BUY" else tick.bid
+    # 3. Universal Pip Math (Works on Forex, Crypto, Metals)
+    pip_value = 10 * info.point 
 
-    sl = price - (STOP_LOSS_PIPS * 0.0001) if signal == "BUY" else price + (STOP_LOSS_PIPS * 0.0001)
-    tp = price + (TAKE_PROFIT_PIPS * 0.0001) if signal == "BUY" else price - (TAKE_PROFIT_PIPS * 0.0001)
+    if signal == "BUY":
+        price = tick.ask
+        sl = price - (STOP_LOSS_PIPS * pip_value)
+        tp = price + (TAKE_PROFIT_PIPS * pip_value)
+        order_type = mt5.ORDER_TYPE_BUY
+    elif signal == "SELL":
+        price = tick.bid
+        sl = price + (STOP_LOSS_PIPS * pip_value)
+        tp = price - (TAKE_PROFIT_PIPS * pip_value)
+        order_type = mt5.ORDER_TYPE_SELL
+    else:
+        log(f"🚨 FAILED: Invalid signal received: {signal}")
+        return
 
-    order_type = mt5.ORDER_TYPE_BUY if signal == "BUY" else mt5.ORDER_TYPE_SELL
-
+    # 4. Build the Request
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
@@ -91,16 +82,15 @@ def execute_trade():
         "tp": tp,
         "deviation": 20,
         "magic": 123456,
-        "comment": "UpgradedBot",
+        "comment": "AI Bot Engine",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": mt5.ORDER_FILLING_IOC, # Change to FOK if broker rejects
     }
 
+    # 5. Send and Log
     result = mt5.order_send(request)
-
-    log(f"{signal} | Lot:{lot} | Price:{price} | SL:{sl} | TP:{tp} | Result:{result}")
-
-# ------------------ LOGGING ------------------
-def log(message):
-    with open("trades_log.txt", "a") as f:
-        f.write(f"{datetime.now()} - {message}\n")
+    
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        log(f"❌ REJECTED: {signal} | Code: {result.retcode} | Msg: {result.comment}")
+    else:
+        log(f"✅ SUCCESS: {signal} | Lot:{lot} | Price:{price} | SL:{sl} | TP:{tp}")
