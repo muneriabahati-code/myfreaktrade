@@ -1,12 +1,9 @@
 import joblib
+import numpy as np # Good to have for formatting data for ML
 
-model = joblib.load("model.pkl")
-
-def predict_trade(rsi, ma_fast, ma_slow):
-
-    prediction = model.predict([[rsi, ma_fast, ma_slow]])
-
-    if prediction[0] == 1:
-        return "BUY"
-    else:
-        return "SELL"
+# Load your AI Model
+try:
+    model = joblib.load("model.pkl")
+except FileNotFoundError:
+    st.error("🚨 model.pkl not found! Make sure it is in the same folder as this script.")
+    st.stop()
